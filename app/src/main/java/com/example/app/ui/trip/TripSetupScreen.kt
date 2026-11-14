@@ -2,6 +2,8 @@ package com.example.app.ui.trip
 
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,8 +13,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.example.app.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.app.ui.theme.*
@@ -269,257 +277,141 @@ fun TripSetupScreen(
 
     val canSave = region.isNotBlank() && datesValid
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(RoadTripBackground)
-            .verticalScroll(rememberScrollState())
-            .padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(22.dp)
-    ) {
-        Text(
-            text = if (initialTrip == null) "새로운 여행" else "여행 수정",
-            fontSize = 36.sp,
-            fontWeight = FontWeight.Bold,
-            color = RoadTripText
-        )
-
-        Text(
-            text = if (initialTrip == null) "지역과 기간을 정해 주세요" else "등록된 여행 정보를 수정해 주세요",
-            fontSize = 24.sp,
-            color = RoadTripTextSecondary
-        )
-
-        // 큰 음성 입력 영역
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFFE5DEFF)
-            ),
-            shape = RoundedCornerShape(28.dp),
-            modifier = Modifier.fillMaxWidth()
+    // Figma TravelMode_Main (1702 px wide). All UI px are mapped by viewport width.
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFFF5F7FA))) {
+        val unit = maxWidth.value / 1702f
+        fun dpScaled(value: Float) = (value * unit).dp
+        fun spScaled(value: Float) = (value * unit).sp
+        Column(
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = dpScaled(38f), vertical = dpScaled(24f)),
+            verticalArrangement = Arrangement.spacedBy(dpScaled(28f))
         ) {
+            Row(Modifier.fillMaxWidth().height(dpScaled(65f)),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Image(painter = painterResource(R.drawable.roadstory_logo),
+                    contentDescription = "Road story", modifier = Modifier.size(
+                        dpScaled(220f),
+                        dpScaled(60f)
+                    ),
+                    contentScale = ContentScale.Fit)
+                Text("메인 화면으로 돌아가기  ❯", Modifier.clickable { onBack() },
+                    color = Color(0xFF352ABA), fontFamily = AstaSans,
+                    fontWeight = FontWeight.Bold, fontSize = spScaled(25f))
+            }
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(28.dp),
+                modifier = Modifier.fillMaxWidth().height(dpScaled(484f))
+                    .shadow(dpScaled(22f), RoundedCornerShape(dpScaled(46f)))
+                    .clip(RoundedCornerShape(dpScaled(46f))).background(Color.White)
+                    .padding(top = dpScaled(40f)),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(dpScaled(10f))
             ) {
-                Text(
-                    text = "말로 입력하기",
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = RoadTripText
+                Text("음성으로 입력하기", fontFamily = AstaSans,
+                    color = Color(0xFF171717), fontWeight = FontWeight.Bold,
+                    fontSize = spScaled(33f))
+                Text("항목 입력 없이 자유롭게 말씀해 주세요", fontFamily = AstaSans,
+                    color = Color(0xFF606060), fontSize = spScaled(25f))
+                Image(
+                    painter = painterResource(R.drawable.roadstory_voice_mic),
+                    contentDescription = if (isListening) "음성 입력 중지" else "음성으로 입력하기",
+                    modifier = Modifier.size(dpScaled(265f)).clickable { startVoiceInput() },
+                    contentScale = ContentScale.Fit
                 )
+                val voiceText = when {
+                    isListening -> "음성을 듣고 있어요"
+                    liveTranscript.isNotBlank() -> liveTranscript
+                    voiceError.isNotBlank() -> voiceError
+                    else -> voiceStatus
+                }
+                Text(voiceText, fontFamily = AstaSans,
+                    color = if (voiceError.isBlank()) Color(0xFF352ABA) else Color(0xFFC0354F),
+                    fontSize = spScaled(22f), textAlign = TextAlign.Center,
+                    maxLines = 2)
+            }
+            Spacer(Modifier.height(dpScaled(5f)))
+            Text("여행 체크인", fontFamily = AstaSans, fontWeight = FontWeight.Bold,
+                fontSize = spScaled(32f), color = Color(0xFF20212B))
+            TripInput("여행 지역", region, "여행 지역", { region = it }, unit)
+            Row(horizontalArrangement = Arrangement.spacedBy(dpScaled(37f))) {
+                Box(Modifier.weight(1f)) {
+                    TripInput("출발 일자", startDate, "출발 일자 (YYYY-MM-DD)",
+                        { startDate = it }, unit)
+                }
+                Box(Modifier.weight(1f)) {
+                    TripInput("종료 일자", endDate, "종료 일자 (YYYY-MM-DD)",
+                        { endDate = it }, unit)
+                }
+            }
+            if ((startDate.isNotBlank() || endDate.isNotBlank()) && !datesValid) {
+                Text("날짜는 YYYY-MM-DD 형식이며 종료일이 출발일 이후여야 합니다.",
+                    color = Color(0xFFC0354F), fontFamily = AstaSans, fontSize = spScaled(20f))
+            }
+            TripInput("동행자", companions, "동행자", { companions = it }, unit)
+            TripInput("이번 여행의 목적", purpose, "이번 여행의 목적", { purpose = it }, unit)
+            TripInput("현재 기분", mood, "현재 기분", { mood = it }, unit)
+            TripInput("이번 여행에서 원하는 경험", desiredExperience,
+                "이번 여행에서 원하는 경험", { desiredExperience = it }, unit)
 
-                Text(
-                    text = "항목 선택 없이 자유롭게 말씀해 주세요",
-                    fontSize = 19.sp,
-                    color = RoadTripTextSecondary
-                )
-
-                Button(
-                    onClick = {
-                        startVoiceInput()
-                    },
-                    modifier = Modifier.size(112.dp),
-                    shape = RoundedCornerShape(32.dp),
-                    contentPadding = PaddingValues(0.dp)
+            var detourExpanded by remember { mutableStateOf(false) }
+            Text("오늘 가능한 우회 시간", fontFamily = AstaSans,
+                fontSize = spScaled(30f), fontWeight = FontWeight.SemiBold,
+                color = Color(0xFF20212B))
+            Box {
+                Box(
+                    Modifier.fillMaxWidth().height(dpScaled(97f))
+                        .shadow(dpScaled(8f), RoundedCornerShape(dpScaled(25f)))
+                        .clip(RoundedCornerShape(dpScaled(25f))).background(Color.White)
+                        .clickable { detourExpanded = true }
+                        .padding(horizontal = dpScaled(33f)),
+                    contentAlignment = Alignment.CenterStart
                 ) {
-                    Text(
-                        text = if (isListening) "⏹️" else "🎙️",
-                        fontSize = 48.sp,
-                        textAlign = TextAlign.Center
-                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(detourPreference.ifBlank { "우회 시간을 선택해 주세요" },
+                            color = Color(0xFF555555), fontFamily = AstaSans,
+                            fontSize = spScaled(29f))
+                        Text("⌄", color = Color.Black, fontSize = spScaled(35f))
+                    }
                 }
-
-                Text(
-                    text = if (isListening) {
-                        "음성을 듣고 있어요"
-                    } else {
-                        voiceStatus
-                    },
-                    fontSize = 20.sp,
-                    color = RoadTripText
-                )
-
-                Text(
-                    text = if (liveTranscript.isNotBlank()) {
-                        liveTranscript
-                    } else if (isListening) {
-                        "말씀해 주세요..."
-                    } else {
-                        "인식된 음성이 여기에 표시됩니다."
-                    },
-                    fontSize = 18.sp,
-                    color = RoadTripText
-                )
-
-                if (voiceError.isNotBlank()) {
-                    Text(
-                        text = voiceError,
-                        fontSize = 18.sp,
-                        color = RoadTripError
-                    )
-                }
-
-                if (voiceResult.isNotBlank()) {
-                    Text(
-                        text = "인식 결과: $voiceResult",
-                        fontSize = 21.sp,
-                        color = RoadTripText
-                    )
+                DropdownMenu(expanded = detourExpanded,
+                    onDismissRequest = { detourExpanded = false },
+                    modifier = Modifier.background(Color.White)) {
+                    listOf("우회를 원하지 않음", "5분 이내", "10분 정도", "20~30분",
+                        "특별한 장소라면 더 멀리도", "정해지지 않음").forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option, fontFamily = AstaSans,
+                                fontSize = spScaled(26f), color = Color(0xFF454545)) },
+                            onClick = {
+                                detourPreference = if (option == "정해지지 않음") "" else option
+                                detourExpanded = false
+                            }
+                        )
+                    }
                 }
             }
-        }
-
-        Text(
-            text = "여행 체크인",
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold,
-            color = RoadTripText
-        )
-
-        TripInput(
-            label = "여행 지역",
-            value = region,
-            placeholder = "예: 강원도",
-            onChange = { region = it }
-        )
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Box(modifier = Modifier.weight(1f)) {
-                TripInput(
-                    label = "출발 날짜",
-                    value = startDate,
-                    placeholder = "2026-11-10",
-                    onChange = { startDate = it }
-                )
-            }
-
-            Box(modifier = Modifier.weight(1f)) {
-                TripInput(
-                    label = "종료 날짜",
-                    value = endDate,
-                    placeholder = "2026-11-12",
-                    onChange = { endDate = it }
-                )
-            }
-        }
-
-        if ((startDate.isNotBlank() ||
-                    endDate.isNotBlank()) && !datesValid) {
-            Text(
-                text = "날짜를 YYYY-MM-DD 형식으로 입력하고 " +
-                        "종료일을 확인해 주세요.",
-                fontSize = 17.sp,
-                color = RoadTripError
-            )
-        }
-
-        TripInput(
-            label = "동행자",
-            value = companions,
-            placeholder = "예: 친구 3명",
-            onChange = { companions = it }
-        )
-
-        TripInput(
-            label = "이번 여행 목적",
-            value = purpose,
-            placeholder = "예: 휴식, 맛집 탐방, 기분 전환",
-            onChange = { purpose = it }
-        )
-
-        TripInput(
-            label = "지금 기분",
-            value = mood,
-            placeholder = "예: 설렘, 여유로움, 피로함",
-            onChange = { mood = it }
-        )
-
-        TripInput(
-            label = "이번 여행에서 원하는 경험",
-            value = desiredExperience,
-            placeholder = "예: 바다 감상, 숨은 명소, 카페",
-            onChange = { desiredExperience = it }
-        )
-
-        Text(
-            text = "오늘 가능한 우회 시간",
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = RoadTripText
-        )
-
-        listOf("우회를 원하지 않음", "5분 이내", "10분 정도", "20~30분", "특별한 장소라면 더 멀리도").forEach { option ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            Spacer(Modifier.height(dpScaled(10f)))
+            Box(
+                Modifier.fillMaxWidth().height(dpScaled(81f))
+                    .shadow(dpScaled(12f), RoundedCornerShape(dpScaled(35f)))
+                    .clip(RoundedCornerShape(dpScaled(35f)))
+                    .background(if (canSave) Color(0xFF352ABA) else Color(0xFFE0E1E7))
+                    .clickable(enabled = canSave) {
+                        onSave(TripInfo(
+                            destination = region.trim(), startDate = startDate.trim(),
+                            endDate = endDate.trim(), companions = companions.trim(),
+                            purpose = purpose.trim(), mood = mood.trim(),
+                            desiredExperience = desiredExperience.trim(),
+                            detourPreference = detourPreference
+                        ))
+                    }, contentAlignment = Alignment.Center
             ) {
-                RadioButton(
-                    selected = detourPreference == option,
-                    onClick = { detourPreference = option }
-                )
-                Text(
-                    text = option,
-                    fontSize = 19.sp,
-                    color = RoadTripText
-                )
+                Text(if (initialTrip == null) "여행 시작하기" else "수정 내용 저장",
+                    color = if (canSave) Color.White else Color(0xFF66666C),
+                    fontFamily = AstaSans, fontWeight = FontWeight.Bold,
+                    fontSize = spScaled(29f))
             }
-        }
-
-        TextButton(onClick = { detourPreference = "" }) {
-            Text("우회 시간 미정")
-        }
-
-        Text(
-            text = "세부 목적지는 여행 중에도 변경할 수 있어요.",
-            fontSize = 19.sp,
-            color = RoadTripTextSecondary
-        )
-
-        Button(
-            onClick = {
-                onSave(
-                    TripInfo(
-                        destination = region.trim(),
-                        startDate = startDate.trim(),
-                        endDate = endDate.trim(),
-                        companions = companions.trim(),
-                        purpose = purpose.trim(),
-                        mood = mood.trim(),
-                        desiredExperience = desiredExperience.trim(),
-                        detourPreference = detourPreference
-                    )
-                )
-            },
-            enabled = canSave,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 76.dp),
-            shape = RoundedCornerShape(20.dp)
-        ) {
-            Text(
-                text = if (initialTrip == null) "여행 등록하기" else "수정 내용 저장",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        OutlinedButton(
-            onClick = onBack,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 68.dp),
-            shape = RoundedCornerShape(20.dp)
-        ) {
-            Text(
-                text = "뒤로 가기",
-                fontSize = 21.sp
-            )
+            Spacer(Modifier.height(dpScaled(40f)))
         }
     }
 }
@@ -529,26 +421,25 @@ private fun TripInput(
     label: String,
     value: String,
     placeholder: String,
-    onChange: (String) -> Unit
+    onChange: (String) -> Unit,
+    u: Float
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
-        label = {
-            Text(label, fontSize = 19.sp)
-        },
-        placeholder = {
-            Text(placeholder, fontSize = 18.sp)
-        },
-        textStyle = androidx.compose.ui.text.TextStyle(
-            fontSize = 23.sp,
-            color = RoadTripText
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 76.dp),
+        placeholder = { Text(placeholder, fontFamily = AstaSans,
+            fontSize = (28f*u).sp, color = Color(0xFF747474)) },
+        textStyle = TextStyle(fontFamily = AstaSans, fontSize = (28f*u).sp,
+            color = Color(0xFF212121)),
+        modifier = Modifier.fillMaxWidth().heightIn(min = (94f*u).dp),
         singleLine = true,
-        shape = RoundedCornerShape(16.dp)
+        shape = RoundedCornerShape((25f*u).dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = Color.White,
+            unfocusedContainerColor = Color.White,
+            focusedBorderColor = Color(0xFF352ABA),
+            unfocusedBorderColor = Color(0xFFE1E1E1)
+        )
     )
 }
 

@@ -1,14 +1,26 @@
 package com.example.app.ui.home
 
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import com.example.app.ui.components.RoadStoryFigmaActionButton
+import com.example.app.ui.components.RoadStoryFigmaCanvas
+import com.example.app.ui.components.RoadStoryFigmaCard
+import com.example.app.ui.components.RoadStoryFigmaHeading
+import com.example.app.ui.components.RoadStoryPurple
+import com.example.app.ui.components.figmaRect
 
-/** 프로필 선택 후 일상/여행 모드로 진입하는 화면. */
+/** Figma 1700x1184 reference layout. Existing navigation callbacks are unchanged. */
 @Composable
 fun ModeSelectionScreen(
     nickname: String?,
@@ -16,43 +28,48 @@ fun ModeSelectionScreen(
     onDailyClick: () -> Unit,
     onChangeProfile: () -> Unit
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text("떠나볼카", style = MaterialTheme.typography.headlineLarge)
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = if (nickname.isNullOrBlank()) "오늘은 어떤 모드로 떠날까요?" else "${nickname}님, 오늘은 어떤 모드로 떠날까요?",
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.titleMedium
+    var chosenMode by rememberSaveable { mutableStateOf("travel") }
+    RoadStoryFigmaCanvas { unit ->
+        RoadStoryFigmaHeading(
+            title = "오늘은 어떠한 여행을 떠나볼까요?",
+            subtitle = "계획하고 있는 여행을 설명해 주세요!",
+            unit = unit
         )
-        Spacer(modifier = Modifier.height(36.dp))
-        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Text("🚗 여행모드", style = MaterialTheme.typography.titleLarge)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("여행 체크인, 목적지 설정, 이동 중 MOA 선제 추천")
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(onClick = onTravelClick, modifier = Modifier.fillMaxWidth()) {
-                    Text("여행모드 시작")
-                }
-            }
+        Box(
+            Modifier.figmaRect(1450, 40, 235, 65, unit)
+                .clickable(role = Role.Button, onClick = onChangeProfile),
+            contentAlignment = Alignment.CenterEnd
+        ) {
+            Text(
+                "다른 프로필 선택 ›",
+                fontSize = (25f * unit).sp,
+                fontWeight = FontWeight.SemiBold,
+                color = RoadStoryPurple,
+                maxLines = 1
+            )
         }
-        Spacer(modifier = Modifier.height(16.dp))
-        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Text("☕ 일상모드", style = MaterialTheme.typography.titleLarge)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("가까운 카페, 식당, 산책 장소 추천 (개발 예정)")
-                Spacer(modifier = Modifier.height(16.dp))
-                OutlinedButton(onClick = onDailyClick, modifier = Modifier.fillMaxWidth()) {
-                    Text("일상모드 들어가기")
-                }
-            }
+        Box(Modifier.figmaRect(373, 265, 434, 668, unit)) {
+            RoadStoryFigmaCard(
+                title = "멀리 떠나는 여행",
+                subtitle = "여행 체크인, 목적지 설정, 이동 중 방문할 장소 추천",
+                selected = chosenMode == "travel",
+                unit = unit,
+                onClick = { chosenMode = "travel" }
+            )
         }
-        Spacer(modifier = Modifier.height(28.dp))
-        TextButton(onClick = onChangeProfile) { Text("다른 프로필 선택") }
+        Box(Modifier.figmaRect(891, 265, 434, 668, unit)) {
+            RoadStoryFigmaCard(
+                title = "가까운 곳으로의 산책",
+                subtitle = "가까운 카페, 식당, 산책 장소 추천",
+                selected = chosenMode == "daily",
+                unit = unit,
+                onClick = { chosenMode = "daily" }
+            )
+        }
+        RoadStoryFigmaActionButton(
+            title = if (chosenMode == "travel") "여행 모드 시작" else "일상 모드 시작",
+            unit = unit,
+            onClick = { if (chosenMode == "travel") onTravelClick() else onDailyClick() }
+        )
     }
 }

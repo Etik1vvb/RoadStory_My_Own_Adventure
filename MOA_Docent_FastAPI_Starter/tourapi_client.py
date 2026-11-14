@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
+from threading import Lock
+from time import monotonic
+from collections import OrderedDict
 from html import unescape
 import logging
 import os
@@ -43,7 +45,7 @@ def _fetch(endpoint: str, *, service_key: str, **values: object) -> list[dict]:
         "MobileOS": "ETC",
         "MobileApp": "MOA",
         "_type": "json",
-        "numOfRows": 20,
+        "numOfRows": 100,
         "pageNo": 1,
         **values,
     }
@@ -109,26 +111,48 @@ def _city(address: str) -> str:
     return ""
 
 
-def _district(address: str) -> str:
-    for part in (address or "").split():
-        if 2 <= len(part) <= 10 and part.endswith(("구", "군")):
-            return part
-    return ""
+def _local_parts(address: str) -> set[str]:
+    parts = (address or "").split()
+    # Metropolitan cities are already handled by _city.
+    return {p for p in parts if p.endswith(("시", "군", "구"))
+            and not p.endswith(("광역시", "특별시", "특별자치시"))}
 
 
 def _same_region(expected: str, actual: str) -> bool:
     if not expected:
         return True
-    want_city, got_city = _city(expected), _city(actual)
-    if want_city and got_city and want_city != got_city:
+    if not actual:
         return False
-    want_district, got_district = _district(expected), _district(actual)
-    if want_district and got_district and want_district != got_district:
+    want, got = _city(expected), _city(actual)
+    if want and want != got:
         return False
-    # 지역 정보가 충분히 구체적인데 상대방은 주소를 전혀 제공하지 않는 경우 제외.
-    if (want_city or want_district) and not actual:
+    locals_wanted = _local_parts(expected)
+    if locals_wanted and not locals_wanted.issubset(_local_parts(actual)):
         return False
+    # Bare locality: 강릉 must match 강릉시, never 속초시.
+    if not want and not locals_wanted:
+        expected_compact = re.sub(r"\s+", "", expected)
+        if expected_compact not in re.sub(r"\s+", "", actual):
+            return False
     return True
+
+
+def _place_core(title: str, address: str) -> str:
+    normalized = _normalize_title(title)
+    # Remove a known local city/county prefix only. Never strip arbitrary suffixes
+    # such as 주차장, 지점, 별관 or conflate 해변 and 해수욕장 blindly.
+    prefixes = sorted((p[:-1] for p in _local_parts(address)
+                       if p.endswith(("시", "군"))), key=len, reverse=True)
+    for prefix in prefixes:
+        if normalized.startswith(prefix) and len(normalized) > len(prefix) + 1:
+            return normalized[len(prefix):]
+    return normalized
+
+
+def _query_variants(name: str, region: str) -> list[str]:
+    clean = re.sub(r"\([^)]*\)|\[[^]]*\]", "", name).strip()
+    values = [name.strip(), clean, re.sub(r"\s+", "", clean), _place_core(clean, region)]
+    return list(dict.fromkeys(v[:60] for v in values if v))[:3]
 
 
 def _clean_overview(raw: str) -> str:
@@ -138,36 +162,77 @@ def _clean_overview(raw: str) -> str:
     return value[:1100]
 
 
-@lru_cache(maxsize=256)
-def find_tour_facts(place_name: str, region: str) -> TourFacts | None:
-    """일치하는 TourAPI 관광지 개요만 반환. 검색 실패는 None, 서비스 실패는 TourApiError."""
+# Successful facts only: misses and service errors are never cached.
+_CACHE = OrderedDict()
+_CACHE_LOCK = Lock()
+_CACHE_TTL = 3600
+
+
+@dataclass(frozen=True)
+class TourLookup:
+    facts: TourFacts | None
+    status: str
+
+
+def lookup_tour_facts(place_name: str, region: str) -> TourLookup:
     key = _key()
     if not key:
-        return None
-    normalized = _normalize_title(place_name)
-    if not normalized:
-        return None
+        return TourLookup(None, "not_configured")
+    if not _normalize_title(place_name):
+        return TourLookup(None, "invalid_name")
+    cache_key = (place_name, region)
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
+        if cached and cached[0] > monotonic():
+            _CACHE.move_to_end(cache_key)
+            return TourLookup(cached[1], "matched_cached")
+        _CACHE.pop(cache_key, None)
 
-    found = _fetch("searchKeyword2", service_key=key, keyword=place_name[:60])
-    matching = [
-        item for item in found
-        if _normalize_title(str(item.get("title", ""))) == normalized
-        and _same_region(region, str(item.get("addr1", "")))
-        and item.get("contentid")
-    ]
+    found = {}
+    for keyword in _query_variants(place_name, region):
+        for row in _fetch("searchKeyword2", service_key=key, keyword=keyword):
+            if row.get("contentid"):
+                found[str(row["contentid"])] = row
+    if not found:
+        return TourLookup(None, "no_results")
+
+    matching = []
+    name_hits = 0
+    for item in found.values():
+        title, address = str(item.get("title", "")), str(item.get("addr1", ""))
+        exact = _normalize_title(title) == _normalize_title(place_name)
+        # Prefix aliases require a supplied region AND matching address.
+        alias = bool(region) and _place_core(title, address) == _place_core(place_name, address)
+        if not (exact or alias):
+            continue
+        name_hits += 1
+        if _same_region(region, address):
+            matching.append(item)
+    if not matching:
+        return TourLookup(None, "region_mismatch" if name_hits else "name_mismatch")
     if len(matching) != 1:
-        # 이름이 같더라도 여러 결과가 있으면 엉뚱한 장소를 소개하는 것보다 생략한다.
-        return None
+        return TourLookup(None, "ambiguous")
+
     item = matching[0]
     details = _fetch("detailCommon2", service_key=key, contentId=item["contentid"])
     if not details:
-        return None
-    overview = _clean_overview(details[0].get("overview", ""))
+        return TourLookup(None, "no_detail")
+    detail = details[0]
+    if detail.get("contentid") and str(detail["contentid"]) != str(item["contentid"]):
+        return TourLookup(None, "detail_id_mismatch")
+    overview = _clean_overview(detail.get("overview", ""))
     if not overview:
-        return None
-    return TourFacts(
-        title=str(item.get("title", place_name)),
-        address=str(item.get("addr1", "")),
-        overview=overview,
-        content_id=str(item["contentid"]),
-    )
+        return TourLookup(None, "no_overview")
+    facts = TourFacts(title=str(item.get("title", place_name)),
+                      address=str(item.get("addr1", "")), overview=overview,
+                      content_id=str(item["contentid"]))
+    with _CACHE_LOCK:
+        _CACHE[cache_key] = (monotonic() + _CACHE_TTL, facts)
+        while len(_CACHE) > 256:
+            _CACHE.popitem(last=False)
+    return TourLookup(facts, "matched")
+
+
+def find_tour_facts(place_name: str, region: str) -> TourFacts | None:
+    """Compatibility wrapper for existing imports."""
+    return lookup_tour_facts(place_name, region).facts

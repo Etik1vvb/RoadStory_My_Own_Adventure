@@ -29,6 +29,10 @@ import com.example.app.data.MoaTripRatingStore
 import androidx.activity.compose.BackHandler
 import com.example.app.data.UserPreferencesRepository
 import com.example.app.data.UserProfile
+import com.example.app.ui.home.RoadStoryHistoryScreen
+import com.example.app.ui.home.RoadStoryOngoingTripsScreen
+import com.example.app.ui.home.RoadStoryStartupScreen
+import com.example.app.ui.home.RoadStorySwitchDialog
 import com.example.app.ui.home.HomeScreen
 import com.example.app.ui.home.ModeSelectionScreen
 import com.example.app.ui.daily.MoaDailyModeScreen
@@ -79,6 +83,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.saveable.rememberSaveable
 
 import com.example.app.vehicle.MoaDocentApiClient
+import com.example.app.vehicle.MoaDocentStory
+import androidx.compose.ui.platform.LocalUriHandler
 
 import ai.pleos.playground.tts.TextToSpeech as PleosTextToSpeech
 import ai.pleos.playground.tts.constant.Mode as PleosTtsMode
@@ -94,12 +100,15 @@ import com.example.app.voice.MoaVoiceAction
 
 
 // 테스트가 끝나면 false로 변경하세요. 실사용: 자동 15분 / 수동 2분 / 목적지 변경 15분.
-private const val MOA_TEST_MODE = true
+private const val MOA_TEST_MODE = false
 private val MOA_AUTO_COOLDOWN_MS: Long = if (MOA_TEST_MODE) 20_000L else 15L * 60L * 1000L
 private val MOA_MANUAL_COOLDOWN_MS: Long = if (MOA_TEST_MODE) 5_000L else 2L * 60L * 1000L
 private val MOA_DESTINATION_COOLDOWN_MS: Long = if (MOA_TEST_MODE) 20_000L else 15L * 60L * 1000L
-private val MOA_CARD_MIN_SCORE: Double = if (MOA_TEST_MODE) 40.0 else 60.0
-private val MOA_AUTO_VOICE_MIN_SCORE: Double = if (MOA_TEST_MODE) 40.0 else 85.0
+private val MOA_CARD_MIN_SCORE: Double =
+    if (MOA_TEST_MODE) 40.0 else 60.0
+
+private val MOA_AUTO_VOICE_MIN_SCORE: Double =
+    if (MOA_TEST_MODE) 40.0 else 70.0
 private const val MOA_VOICE_CONSENT_MS = 30_000L
 
 class MainActivity : ComponentActivity() {
@@ -241,6 +250,8 @@ class MainActivity : ComponentActivity() {
             val scope = rememberCoroutineScope()
 
             val docentApi = remember { MoaDocentApiClient() }
+            var docentDetails by remember { mutableStateOf<MoaDocentStory?>(null) }
+            var voiceDocentDetails by remember { mutableStateOf<MoaDocentStory?>(null) }
 
             var docentStory by remember {
                 mutableStateOf<String?>(null)
@@ -268,7 +279,7 @@ class MainActivity : ComponentActivity() {
 
             // 앱을 시작할 때마다 프로필 선택 화면을 보여줍니다.
             var currentScreen by rememberSaveable {
-                mutableStateOf("profile_select")
+                mutableStateOf("startup")
             }
             var profileEditReturnScreen by remember {
                 mutableStateOf("home")
@@ -285,6 +296,10 @@ class MainActivity : ComponentActivity() {
             var destinationTripId by rememberSaveable {
                 mutableStateOf<String?>(null)
             }
+
+            // Invalidate late responses when screen, trip or profile changes.
+            val docentSession = remember(currentScreen, destinationTripId, profile, selectedTrip) { Any() }
+            val latestDocentSession = rememberUpdatedState(docentSession)
 
             // 여행별 자동 음성 추천 기록
 
@@ -384,6 +399,10 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf<Map<String, Double>>(emptyMap())
             }
 
+            var voiceSearchReasons by remember(destinationTripId) {
+                mutableStateOf<Map<String, List<String>>>(emptyMap())
+            }
+
             var voiceDocentLoading by remember(destinationTripId) {
                 mutableStateOf(false)
             }
@@ -459,6 +478,22 @@ class MainActivity : ComponentActivity() {
 
             var voiceDocentError by remember(destinationTripId) {
                 mutableStateOf<String?>(null)
+            }
+
+            LaunchedEffect(docentSession) {
+                voiceDocentGeneration++
+                voiceDocentStory = null
+                voiceDocentDetails = null
+                voiceDocentStoryPlaceId = null
+                voiceDocentError = null
+                voiceDocentLoading = false
+                voiceDocentAwaitingConsent = false
+                voiceDocentPendingPlace = null
+                voiceDocentConsentExpiresAt = 0L
+                docentStory = null
+                docentDetails = null
+                docentError = null
+                docentLoading = false
             }
 
             var voiceCandidatesVisibleCount by remember(destinationTripId) {
@@ -834,6 +869,72 @@ class MainActivity : ComponentActivity() {
                 autoRecommendationEngine.setActiveTrip(activeId)
             }
 
+            // Shared navigation resume route: the old "여행 계속하기" behavior.
+            // Do NOT bypass NaviHelper or mutate recommendation/destination code.
+            fun continueActiveTrip(trip: SavedTrip) {
+                if (trip.status != TripStatus.ACTIVE) return
+                if (naviRouting) return
+                val existingDestination = destinations[trip.id]
+                destinationTripId = trip.id
+                if (existingDestination == null) {
+                    currentScreen = "destination"
+                    return
+                }
+                currentScreen = "trip_active"
+                naviRouting = true
+                naviStatus = "저장된 목적지 안내 준비 중..."
+                try {
+                    moaNaviManager.requestRecommendedDestination(
+                        place = existingDestination,
+                        onStatus = { status -> naviStatus = status },
+                        onCompleted = {
+                            naviConnected = true
+                            naviRouting = false
+                            naviStatus = "경로 탐색 완료: ${existingDestination.name}"
+                            Log.d("MOA_NAVI", "여행 이어가기 경로 탐색 완료: ${existingDestination.name}")
+                        },
+                        onFailed = { message ->
+                            naviRouting = false
+                            naviStatus = "길 안내 실패: $message"
+                            Log.e("MOA_NAVI", "여행 이어가기 경로 요청 실패: $message")
+                        }
+                    )
+                } catch (e: Exception) {
+                    naviRouting = false
+                    naviStatus = "길 안내 오류: ${e.message}"
+                    Log.e("MOA_NAVI", "여행 이어가기 예외", e)
+                }
+            }
+
+            fun startPlannedTrip(trip: SavedTrip) {
+                if (trip.status == TripStatus.ACTIVE) {
+                    continueActiveTrip(trip)
+                    return
+                }
+                if (trip.status != TripStatus.PLANNED) return
+                val otherActiveTrip = allProfileTrips.firstOrNull {
+                    it.status == TripStatus.ACTIVE && it.id != trip.id
+                }
+                if (otherActiveTrip != null) {
+                    pendingStartTripId = trip.id
+                } else {
+                    scope.launch {
+                        try {
+                            if (tripRepository.startTrip(trip.id)) {
+                                destinationTripId = trip.id
+                                tripError = null
+                                currentScreen = "destination"
+                            } else {
+                                tripError = "여행 시작에 실패했습니다."
+                            }
+                        } catch (e: Exception) {
+                            Log.e("RoadTripTrip", "여행 시작 실패", e)
+                            tripError = "여행 시작 중 오류가 발생했습니다."
+                        }
+                    }
+                }
+            }
+
             APPTheme {
 
                 val ttsContext = LocalContext.current.applicationContext
@@ -895,6 +996,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 when (currentScreen) {
+                    "startup" -> RoadStoryStartupScreen(onFinished = {
+                        currentScreen = "profile_select"
+                    })
                     "profile_select" -> {
                         val loadedProfiles = profiles
                         if (loadedProfiles == null) {
@@ -1045,14 +1149,23 @@ class MainActivity : ComponentActivity() {
                     "home" -> {
                         HomeScreen(
                             nickname = profile?.nickname,
-                            destination = savedTrip?.destination,
-                            tripStatus = tripStatus,
-                            onPrimaryClick = {
-                                if (profile?.id.isNullOrBlank()) {
-                                    currentScreen = "profile_select"
-                                } else {
-                                    currentScreen = "saved"
+                            destination = allProfileTrips.firstOrNull { it.status == TripStatus.ACTIVE }
+                                ?.info?.destination ?: savedTrip?.destination,
+                            tripStatus = allProfileTrips.firstOrNull { it.status == TripStatus.ACTIVE }
+                                ?.status ?: tripStatus,
+                            onOngoingClick = { currentScreen = "saved" },
+                            onContinueClick = {
+                                val activeTrip = allProfileTrips.firstOrNull {
+                                    it.status == TripStatus.ACTIVE
                                 }
+                                if (activeTrip != null) continueActiveTrip(activeTrip)
+                                else currentScreen = "saved"
+                            },
+                            onNewTripClick = {
+                                tripError = null
+                                editTripTarget = null
+                                repeatTripSource = null
+                                currentScreen = "trip"
                             },
                             onProfileClick = {
                                 profileEditReturnScreen = "home"
@@ -1062,276 +1175,72 @@ class MainActivity : ComponentActivity() {
                                 profileError = null
                                 currentScreen = "profile_select"
                             },
-                            onHistoryClick = {
-                                currentScreen = "history"
-                            }
+                            onHistoryClick = { currentScreen = "history" }
                         )
                     }
 
                     "saved" -> {
-                        Column(
-                            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Text("여행 관리", style = MaterialTheme.typography.headlineSmall)
-                            Text("${profile?.nickname.orEmpty()} 프로필의 여행")
-                            OutlinedButton(
-                                onClick = {
-                                    profileError = null
-                                    profileEditReturnScreen = "saved"
-                                    currentScreen = "profile_edit"
-                                },
-                                enabled = !profile?.id.isNullOrBlank(),
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("내 여행 취향 수정") }
-                            profileError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                            Button(
-                                onClick = {
-                                    tripError = null
-                                    editTripTarget = null
-                                    repeatTripSource = null
-                                    currentScreen = "trip"
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { Text("+ 새 여행 등록하기") }
-                            tripError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                            val ongoing = allProfileTrips.filter { it.status != TripStatus.COMPLETED }
-                            if (ongoing.isEmpty()) Text("예정되거나 진행 중인 여행이 없습니다.")
-                            ongoing.forEach { trip ->
-                                val isSelected = selectedTrip?.id == trip.id
-                                val isActive = trip.status == TripStatus.ACTIVE
-
-                                Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    border = if (trip.status == TripStatus.ACTIVE) {
-                                        BorderStroke(
-                                            width = 2.dp,
-                                            color = Color(0xFF6C45DC)
-                                        )
-                                    } else {
-                                        null
-                                    },
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = if (trip.status == TripStatus.ACTIVE) {
-                                            Color(0xFFF2EDFF)
-                                        } else {
-                                            MaterialTheme.colorScheme.surface
-                                        }
-                                    ),
-                                    elevation = CardDefaults.cardElevation(
-                                        defaultElevation = 2.dp
-                                    )
-                                ) {
-
-                                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Text(trip.info.destination, style = MaterialTheme.typography.titleMedium)
-                                        Text("${trip.info.startDate} ~ ${trip.info.endDate}")
-                                        Text("동행자: ${trip.info.companions} / 목적: ${trip.info.purpose}")
-                                        Text(when(trip.status) {
-                                            TripStatus.PLANNED -> "출발 전"
-                                            TripStatus.ACTIVE -> "여행 중"
-                                            TripStatus.COMPLETED -> "완료"
-                                        } + if (isSelected) " · 현재 선택" else "")
-
-
-                                        if (trip.status == TripStatus.PLANNED) {
-                                            Button(
-                                                onClick = {
-                                                    tripError = null
-
-                                                    val activeTrip = allProfileTrips.firstOrNull {
-                                                        it.status == TripStatus.ACTIVE &&
-                                                                it.profileId == trip.profileId &&
-                                                                it.id != trip.id
-                                                    }
-
-                                                    if (activeTrip != null) {
-                                                        pendingStartTripId = trip.id
-                                                    } else {
-                                                        scope.launch {
-                                                            try {
-                                                                val started = tripRepository.startTrip(trip.id)
-
-                                                                if (started) {
-                                                                    destinationTripId = trip.id
-                                                                    currentScreen = "destination"
-                                                                } else {
-                                                                    tripError = "여행 시작에 실패했습니다."
-                                                                }
-                                                            } catch (e: Exception) {
-                                                                Log.e("RoadTripTrip", "여행 시작 실패", e)
-                                                                tripError = "여행 시작 중 오류가 발생했습니다."
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            ) {
-                                                Text("여행 시작하기 · 목적지 선택")
-                                            }
-                                        }
-
-
-
-                                        if (trip.status == TripStatus.ACTIVE) {
-                                            Text("현재 목적지: ${destinations[trip.id]?.name ?: "미설정"}")
-
-                                            val existingDestination = destinations[trip.id]
-
-                                            Button(
-                                                onClick = {
-                                                    val destination = existingDestination ?: return@Button
-
-                                                    if (naviRouting) return@Button
-
-                                                    destinationTripId = trip.id
-                                                    currentScreen = "trip_active"
-
-                                                    naviRouting = true
-                                                    naviStatus = "저장된 목적지 안내 준비 중..."
-
-                                                    try {
-                                                        moaNaviManager.requestRecommendedDestination(
-                                                            place = destination,
-
-                                                            onStatus = { status ->
-                                                                naviStatus = status
-                                                            },
-
-                                                            onCompleted = {
-                                                                naviConnected = true
-                                                                naviRouting = false
-                                                                naviStatus = "경로 탐색 완료: ${destination.name}"
-
-                                                                Log.d(
-                                                                    "MOA_NAVI",
-                                                                    "여행 이어가기 경로 탐색 완료: ${destination.name}"
-                                                                )
-                                                            },
-
-                                                            onFailed = { message ->
-                                                                naviRouting = false
-                                                                naviStatus = "길 안내 실패: $message"
-
-                                                                Log.e(
-                                                                    "MOA_NAVI",
-                                                                    "여행 이어가기 경로 요청 실패: $message"
-                                                                )
-                                                            }
-                                                        )
-
-                                                    } catch (e: Exception) {
-                                                        naviRouting = false
-                                                        naviStatus = "길 안내 오류: ${e.message}"
-
-                                                        Log.e(
-                                                            "MOA_NAVI",
-                                                            "여행 이어가기 예외",
-                                                            e
-                                                        )
-                                                    }
-                                                },
-                                                enabled = existingDestination != null && !naviRouting,
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Text("🚗 여행 계속하기")
-                                            }
-
-                                            OutlinedButton(onClick = {
-                                                destinationTripId = trip.id
-                                                currentScreen = "destination"
-                                            }) { Text("다음 목적지 선택 / 변경") }
-                                            Button(onClick = {
-                                                scope.launch {
-                                                    try {
-                                                        if (!tripRepository.completeTrip(trip.id))
-                                                            tripError = "여행 종료에 실패했습니다."
-                                                        else tripError = null
-                                                    } catch (e: Exception) {
-                                                        Log.e("RoadTripTrip", "여행 종료 실패", e)
-                                                        tripError = "여행 종료 중 오류가 발생했습니다."
-                                                    }
-                                                }
-                                            }) { Text("여행 종료하기") }
-                                        }
-                                        OutlinedButton(onClick = {
-                                            tripError = null
-                                            editTripTarget = trip
-                                            currentScreen = "trip"
-                                        }) { Text("체크인 수정") }
-                                        TextButton(onClick = { deleteTripTarget = trip }) {
-                                            Text("여행 삭제", color = MaterialTheme.colorScheme.error)
-                                        }
+                        // Figma TravelHistory_2: only ACTIVE and PLANNED trips.
+                        RoadStoryOngoingTripsScreen(
+                            trips = allProfileTrips.filter { it.status != TripStatus.COMPLETED },
+                            destinations = destinations.mapValues { it.value.name },
+                            onBack = { currentScreen = "home" },
+                            onContinue = { trip -> continueActiveTrip(trip) },
+                            onStart = { trip -> startPlannedTrip(trip) },
+                            onChooseDestination = { trip ->
+                                if (trip.status == TripStatus.ACTIVE) {
+                                    destinationTripId = trip.id
+                                    currentScreen = "destination"
+                                } else {
+                                    startPlannedTrip(trip)
+                                }
+                            },
+                            onEdit = { trip ->
+                                tripError = null
+                                editTripTarget = trip
+                                repeatTripSource = null
+                                currentScreen = "trip"
+                            },
+                            onComplete = { trip ->
+                                scope.launch {
+                                    try {
+                                        if (!tripRepository.completeTrip(trip.id))
+                                            tripError = "여행 종료에 실패했습니다."
+                                        else tripError = null
+                                    } catch (e: Exception) {
+                                        Log.e("RoadTripTrip", "여행 종료 실패", e)
+                                        tripError = "여행 종료 중 오류가 발생했습니다."
                                     }
                                 }
-                            }
-                            HorizontalDivider()
-                            Text("완료된 여행: ${allProfileTrips.count { it.status == TripStatus.COMPLETED }}개")
-                            OutlinedButton(onClick = { currentScreen = "history" }) { Text("지난 여행 기록 보기") }
-                            OutlinedButton(onClick = { currentScreen = "home" }) { Text("홈으로 돌아가기") }
-                        }
-
+                            },
+                            onDelete = { trip -> deleteTripTarget = trip },
+                            errorMessage = tripError
+                        )
+                        // Existing switchToTrip preserves the previous ACTIVE trip as PLANNED.
                         val requestedTripId = pendingStartTripId
-
                         if (requestedTripId != null) {
-                            val activeTrip = allProfileTrips.firstOrNull {
-                                it.status == TripStatus.ACTIVE &&
-                                        it.id != requestedTripId
-                            }
-
-                            AlertDialog(
-                                onDismissRequest = {
+                            RoadStorySwitchDialog(
+                                onDismiss = { pendingStartTripId = null },
+                                onConfirm = {
+                                    val tripId = pendingStartTripId
                                     pendingStartTripId = null
-                                },
-                                title = {
-                                    Text("진행 중인 여행이 있습니다")
-                                },
-                                text = {
-                                    Text(
-                                        "현재 ${activeTrip?.info?.destination ?: "다른"} 여행이 진행 중입니다.\n\n" +
-                                                "새 여행을 시작하면 기존 여행은 준비 상태로 전환됩니다. " +
-                                                "나중에 다시 이어갈 수 있습니다.\n\n" +
-                                                "새 여행의 목적지를 선택하시겠습니까?"
-                                    )
-                                },
-                                confirmButton = {
-                                    TextButton(
-                                        onClick = {
-                                            val tripId = pendingStartTripId ?: return@TextButton
-                                            pendingStartTripId = null
-
-                                            scope.launch {
-                                                try {
-                                                    val switched = tripRepository.switchToTrip(tripId)
-
-                                                    if (switched) {
-                                                        destinationTripId = tripId
-                                                        tripError = null
-                                                        currentScreen = "destination"
-                                                    } else {
-                                                        tripError = "여행 전환에 실패했습니다."
-                                                    }
-                                                } catch (e: Exception) {
-                                                    Log.e("RoadTripTrip", "여행 전환 실패", e)
-                                                    tripError = "여행 전환 중 오류가 발생했습니다."
-                                                }
+                                    if (tripId != null) {
+                                        scope.launch {
+                                            try {
+                                                if (tripRepository.switchToTrip(tripId)) {
+                                                    destinationTripId = tripId
+                                                    tripError = null
+                                                    currentScreen = "destination"
+                                                } else tripError = "여행 전환에 실패했습니다."
+                                            } catch (e: Exception) {
+                                                Log.e("RoadTripTrip", "여행 전환 실패", e)
+                                                tripError = "여행 전환 중 오류가 발생했습니다."
                                             }
                                         }
-                                    ) {
-                                        Text("새 여행 준비하기")
-                                    }
-                                },
-                                dismissButton = {
-                                    TextButton(
-                                        onClick = {
-                                            pendingStartTripId = null
-                                        }
-                                    ) {
-                                        Text("취소")
                                     }
                                 }
                             )
                         }
-
                     }
 
                     "destination" -> {
@@ -1467,12 +1376,14 @@ class MainActivity : ComponentActivity() {
                             cancelVoiceConsent(reason)
                             voiceDocentPendingPlace = null
                             voiceDocentStory = null
+                            voiceDocentDetails = null
                             voiceDocentStoryPlaceId = null
                             voiceDocentError = null
                             voiceDocentLoading = false
 
                             docentSelectedPlaceId = null
                             docentStory = null
+                            docentDetails = null
                             docentError = null
                             docentLoading = false
                             ttsStatus = "음성 대기"
@@ -1481,6 +1392,7 @@ class MainActivity : ComponentActivity() {
                             voiceSearchKeyword = ""
                             voiceSearchPlaces = emptyList()
                             voiceSearchScores = emptyMap()
+                            voiceSearchReasons = emptyMap()
                             voiceSearchMessage = ""
                             voiceCandidatesVisibleCount = 4
 
@@ -1701,9 +1613,11 @@ class MainActivity : ComponentActivity() {
                                         voiceDocentAwaitingConsent = false
                                         voiceDocentLoading = true
                                         voiceDocentStory = null
+                                        voiceDocentDetails = null
                                         voiceDocentError = null
 
                                         val requestGeneration = voiceDocentGeneration
+                                        val requestSession = latestDocentSession.value
 
                                         scope.launch {
                                             try {
@@ -1721,18 +1635,24 @@ class MainActivity : ComponentActivity() {
 
                                                 val result = docentApi.generateStory(
                                                     placeName = selectedPlace.name,
-                                                    region = selectedPlace.address.take(100),
-                                                    topic = "해당 장소와 지역의 역사, 문화, 음식 이야기",
-                                                    userInterests = latestVoiceTarget.value?.info?.purpose.orEmpty(),
+                                                    region = docentRegion(selectedPlace.address),
+                                                    topic = "auto",
+                                                    userInterests = docentInterests(
+                                                        latestVoiceProfile.value,
+                                                        latestVoiceTarget.value?.info
+                                                    ),
                                                     verifiedFacts = basicFacts,
-                                                    sourceName = "카카오 로컬 API 장소 기본 정보"
+                                                    sourceName = "카카오 로컬 API 장소 기본 정보",
+                                                    address = selectedPlace.roadAddress.ifBlank { selectedPlace.address }.take(250),
+                                                    recommendationReasons = voiceSearchReasons[selectedPlace.id].orEmpty().take(5)
                                                 )
 
                                                 if (
-                                                    requestGeneration == voiceDocentGeneration &&
+                                                    requestSession === latestDocentSession.value && requestGeneration == voiceDocentGeneration &&
                                                     voiceDocentPendingPlace?.id == selectedPlace.id
                                                 ) {
                                                     voiceDocentStory = result.storyText
+                                                    voiceDocentDetails = result
                                                     voiceDocentStoryPlaceId = selectedPlace.id
                                                     // 설명을 들은 뒤에도 30초 동안 '거기로 가자'를 받을 수 있게 한다.
                                                     // '좋아'는 이 단계에서만 목적지 수락으로 처리한다.
@@ -1749,12 +1669,12 @@ class MainActivity : ComponentActivity() {
                                             ) {
                                                 throw e
                                             } catch (e: Exception) {
-                                                if (requestGeneration == voiceDocentGeneration) {
+                                                if (requestSession === latestDocentSession.value && requestGeneration == voiceDocentGeneration) {
                                                     voiceDocentError =
                                                         e.message ?: "AI 설명 생성 실패"
                                                 }
                                             } finally {
-                                                if (requestGeneration == voiceDocentGeneration) {
+                                                if (requestSession === latestDocentSession.value && requestGeneration == voiceDocentGeneration) {
                                                     voiceDocentLoading = false
                                                 }
                                             }
@@ -1929,6 +1849,9 @@ class MainActivity : ComponentActivity() {
 
                                                             // 직접 요청이므로 60점 제한은 적용하지 않음
                                                             voiceSearchPlaces = ranked.map { it.place }
+                                                            voiceSearchReasons = ranked.associate {
+                                                                it.place.id to it.reasons.take(5)
+                                                            }
 
                                                             voiceSearchScores = ranked.associate {
                                                                 it.place.id to it.score.total
@@ -1936,6 +1859,7 @@ class MainActivity : ComponentActivity() {
 
                                                             voiceCandidatesVisibleCount = 4
                                                             voiceDocentStory = null
+                                                            voiceDocentDetails = null
                                                             voiceDocentStoryPlaceId = null
                                                             voiceDocentError = null
 
@@ -1956,6 +1880,7 @@ class MainActivity : ComponentActivity() {
 
                                                             if (topPlace != null) {
                                                                 voiceDocentStory = null
+                                                                voiceDocentDetails = null
                                                                 voiceDocentStoryPlaceId = null
                                                                 voiceDocentError = null
                                                                 voiceDocentLoading = false
@@ -2211,6 +2136,7 @@ class MainActivity : ComponentActivity() {
                                                                 // 이전 장소에 대한 늦은 GPT 응답과 재생을 폐기
                                                                 voiceDocentGeneration++
                                                                 voiceDocentStory = null
+                                                                voiceDocentDetails = null
                                                                 voiceDocentStoryPlaceId = null
                                                                 voiceDocentError = null
                                                                 voiceDocentLoading = false
@@ -2248,7 +2174,7 @@ class MainActivity : ComponentActivity() {
                                                         LinearProgressIndicator(
                                                             modifier = Modifier.fillMaxWidth()
                                                         )
-                                                        Text("장소 이야기를 생성하고 있습니다.")
+                                                        Text("장소 자료를 찾고 방문 이유를 정리하고 있습니다. 처음에는 시간이 걸릴 수 있습니다.")
                                                     }
 
                                                     // 반드시 현재 표시 중인 첫 번째 추천 장소와 일치하는 이야기만 노출.
@@ -2260,6 +2186,7 @@ class MainActivity : ComponentActivity() {
                                                                 style = MaterialTheme.typography.bodyMedium
                                                             )
 
+                                                            MoaDocentSources(voiceDocentDetails)
                                                             Row(
                                                                 horizontalArrangement =
                                                                     Arrangement.spacedBy(8.dp)
@@ -2950,8 +2877,10 @@ class MainActivity : ComponentActivity() {
                                                     val recommendedPlace = scored.place
                                                     cardDocentRequestVersion++
                                                     val requestVersion = cardDocentRequestVersion
+                                                    val requestSession = latestDocentSession.value
                                                     docentSelectedPlaceId = recommendedPlace.id
                                                     docentStory = null
+                                                    docentDetails = null
                                                     docentError = null
                                                     docentLoading = true
 
@@ -2972,17 +2901,20 @@ class MainActivity : ComponentActivity() {
 
                                                             val result = docentApi.generateStory(
                                                                 placeName = recommendedPlace.name,
-                                                                region = recommendedPlace.address.take(100),
-                                                                topic = "해당 장소와 지역의 역사, 문화, 음식 이야기",
-                                                                userInterests = target?.info?.purpose.orEmpty(),
+                                                                region = docentRegion(recommendedPlace.address),
+                                                                topic = "auto",
+                                                                userInterests = docentInterests(profile, target?.info),
                                                                 verifiedFacts = basicFacts,
-                                                                sourceName = "카카오 로컬 API 장소 기본 정보"
+                                                                sourceName = "카카오 로컬 API 장소 기본 정보",
+                                                                address = recommendedPlace.roadAddress.ifBlank { recommendedPlace.address }.take(250),
+                                                                recommendationReasons = scored.reasons.take(5)
                                                             )
 
 
-                                                            if (requestVersion == cardDocentRequestVersion &&
+                                                            if (requestSession === latestDocentSession.value && requestVersion == cardDocentRequestVersion &&
                                                                 docentSelectedPlaceId == recommendedPlace.id) {
                                                                 docentStory = result.storyText
+                                                                docentDetails = result
 
                                                                 // 사용자가 직접 요청한 장소의 이야기를 재생
                                                                 if (ttsReady && result.storyText.isNotBlank()) {
@@ -3014,12 +2946,12 @@ class MainActivity : ComponentActivity() {
                                                         } catch (e: kotlinx.coroutines.CancellationException) {
                                                             throw e
                                                         } catch (e: Exception) {
-                                                            if (requestVersion == cardDocentRequestVersion) {
+                                                            if (requestSession === latestDocentSession.value && requestVersion == cardDocentRequestVersion) {
                                                                 docentError = e.message ?: "도슨트 연결 실패"
                                                             }
                                                             Log.e("MOA_DOCENT", "장소 이야기 생성 실패", e)
                                                         } finally {
-                                                            if (requestVersion == cardDocentRequestVersion) {
+                                                            if (requestSession === latestDocentSession.value && requestVersion == cardDocentRequestVersion) {
                                                                 docentLoading = false
                                                             }
                                                         }
@@ -3029,7 +2961,7 @@ class MainActivity : ComponentActivity() {
                                                 Text(
                                                     if (docentLoading && docentSelectedPlaceId == scored.place.id)
                                                         "이야기 생성 중..."
-                                                    else "✨ 이 장소 이야기"
+                                                    else "✨ 이 장소가 추천된 이유"
                                                 )
                                             }
 
@@ -3040,6 +2972,7 @@ class MainActivity : ComponentActivity() {
                                                         style = MaterialTheme.typography.bodyMedium
                                                     )
 
+                                                    MoaDocentSources(docentDetails)
                                                     Row(
                                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                                     ) {
@@ -3234,106 +3167,61 @@ class MainActivity : ComponentActivity() {
                             },
 
                             onBack = {
+                                val backScreen = when {
+                                    editingTrip != null -> "saved"
+                                    repeatingTrip != null -> "history"
+                                    else -> "home"
+                                }
                                 editTripTarget = null
                                 repeatTripSource = null
-                                currentScreen = "saved"
+                                currentScreen = backScreen
                             }
                         )
                     }
 
 
                     "history" -> {
-                        val completedTrips = allProfileTrips.filter { it.status == TripStatus.COMPLETED }
-                        Column(
-
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(MaterialTheme.colorScheme.background)
-                                .verticalScroll(rememberScrollState())
-                                .padding(24.dp),
-
-                            verticalArrangement = Arrangement.spacedBy(16.dp)
-                        ) {
-                            Text("여행 기록", style = MaterialTheme.typography.headlineLarge)
-                            Text("${profile?.nickname.orEmpty()} 프로필의 완료된 여행")
-                            if (completedTrips.isEmpty()) {
-                                Text("아직 완료된 여행이 없습니다.")
-                            } else {
-                                Text(
-                                    "기본 만족도는 3점(중립)입니다. 평가를 저장하면 다음 여행의 장소 추천에 반영됩니다.",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                tripRatingMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-
-                                completedTrips.forEach { trip ->
-                                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                                        Column(
-                                            modifier = Modifier.padding(16.dp),
-                                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                                        ) {
-                                            Text(trip.info.destination, style = MaterialTheme.typography.titleMedium)
-                                            Text("${trip.info.startDate} ~ ${trip.info.endDate}")
-                                            Text("동행자: ${trip.info.companions}")
-                                            Text("여행 목적: ${trip.info.purpose}")
-
-                                            // 평가하지 않은 여행은 기본 3점으로 보여주되 학습에는 반영하지 않습니다.
-                                            val savedRating = remember(trip.id, tripRatingVersion) {
-                                                tripRatingStore.getRating(trip.id)
-                                            }
-                                            MoaTripSatisfactionRatingRow(
-                                                savedRating = savedRating,
-                                                onSave = { stars ->
-                                                    val finalPlace = destinations[trip.id]
-                                                    val category = finalPlace?.takeIf { it.category != "주소" }?.let {
-                                                        MoaPlaceCategory.classify(name = it.name, category = it.category)
-                                                    }?.takeUnless { it == MoaPlaceCategory.OTHER }
-
-                                                    if (tripRatingStore.saveRating(
-                                                            tripId = trip.id,
-                                                            profileId = trip.profileId,
-                                                            rating = stars,
-                                                            category = category
-                                                        )) {
-                                                        tripRatingVersion++
-                                                        tripRatingMessage = "'${trip.info.destination}' 만족도 ${stars}점 저장 완료"
-                                                    } else {
-                                                        tripRatingMessage = "만족도 저장에 실패했습니다."
-                                                    }
-                                                }
-                                            )
-
-                                            Button(
-                                                onClick = {
-                                                    tripError = null
-
-                                                    // 기존 여행을 수정하는 것이 아니라
-                                                    // 새 여행을 등록하는 모드로 전환
-                                                    editTripTarget = null
-
-                                                    // 복사할 완료 여행의 체크인 정보
-                                                    repeatTripSource = trip
-
-                                                    currentScreen = "trip"
-                                                },
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Text("🔄 다시 여행하기")
-                                            }
-
-                                            TextButton(onClick = { deleteTripTarget = trip }) {
-                                                Text("여행 기록 삭제", color = MaterialTheme.colorScheme.error)
-                                            }
+                        // Figma TravelHistory.png: only COMPLETED; no active or planned trip.
+                        RoadStoryHistoryScreen(
+                            trips = allProfileTrips.filter { it.status == TripStatus.COMPLETED },
+                            onBack = { currentScreen = "home" },
+                            onRepeat = { trip ->
+                                tripError = null
+                                editTripTarget = null
+                                repeatTripSource = trip
+                                currentScreen = "trip"
+                            },
+                            onDelete = { trip -> deleteTripTarget = trip },
+                            ratingContent = { trip ->
+                                val savedRating = remember(trip.id, tripRatingVersion) {
+                                    tripRatingStore.getRating(trip.id)
+                                }
+                                MoaTripSatisfactionRatingRow(
+                                    savedRating = savedRating,
+                                    onSave = { stars ->
+                                        val finalPlace = destinations[trip.id]
+                                        val category = finalPlace
+                                            ?.takeIf { it.category != "주소" }
+                                            ?.let { MoaPlaceCategory.classify(name = it.name, category = it.category) }
+                                            ?.takeUnless { it == MoaPlaceCategory.OTHER }
+                                        if (tripRatingStore.saveRating(
+                                                tripId = trip.id,
+                                                profileId = trip.profileId,
+                                                rating = stars,
+                                                category = category
+                                            )) {
+                                            tripRatingVersion++
+                                            tripRatingMessage = "'${trip.info.destination}' 만족도 ${stars}점 저장 완료"
+                                        } else {
+                                            tripRatingMessage = "만족도 저장에 실패했습니다."
                                         }
                                     }
+                                )
+                                tripRatingMessage?.let {
+                                    Text(it, color = MaterialTheme.colorScheme.primary)
                                 }
                             }
-                            Button(onClick = { currentScreen = "home" }) {
-                                Text("홈으로 돌아가기")
-                            }
-                            TextButton(onClick = { currentScreen = "moa_voice_test" }) {
-                                Text("음성 테스트 (개발용)")
-                            }
-                        }
+                        )
                     }
 
                     "moa_voice_test" -> MoaVoiceTestScreen(onExit = {
@@ -3397,7 +3285,7 @@ fun RoadTripHome(onStartClick: () -> Unit) {
     ) {
         Text("🚗", fontSize = 64.sp)
         Spacer(modifier = Modifier.height(20.dp))
-        Text("떠나볼카", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Text("RoadStory", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
         Spacer(modifier = Modifier.height(12.dp))
         Text(
             "여정의 이야기를 들려주는\nAI 여행 도슨트",
@@ -3525,4 +3413,52 @@ private fun MoaAutoRecommendationTimer(
             style = MaterialTheme.typography.bodySmall
         )
     }
+}
+
+// Keep a locality, not a street address, for regional fallback searches.
+private fun docentRegion(address: String): String {
+    val parts = address.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+    val shortRegions = setOf("서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종",
+        "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주")
+    return parts.takeWhile {
+        it in shortRegions || it.endsWith("도") || it.endsWith("시") ||
+                it.endsWith("군") || it.endsWith("구")
+    }.joinToString(" ").take(100)
+}
+
+private fun docentInterests(profile: UserProfile?, trip: TripInfo?): String = buildList {
+    profile?.preferences?.takeIf { it.isNotEmpty() }?.let { add("관심사: ${it.joinToString(", ")}") }
+    profile?.atmospheres?.takeIf { it.isNotEmpty() }?.let { add("선호 분위기: ${it.joinToString(", ")}") }
+    trip?.purpose?.takeIf { it.isNotBlank() }?.let { add("여행 목적: $it") }
+    trip?.desiredExperience?.takeIf { it.isNotBlank() }?.let { add("희망 경험: $it") }
+    trip?.mood?.takeIf { it.isNotBlank() }?.let { add("여행 분위기: $it") }
+}.joinToString(" / ").take(200)
+
+@Composable
+private fun MoaDocentSources(story: MoaDocentStory?) {
+    if (story == null) return
+    val uriHandler = LocalUriHandler.current
+    var linkError by remember(story) { mutableStateOf<String?>(null) }
+    if (story.storyScope == "region" || story.storyScope == "mixed") {
+        Text(
+            if (story.storyScope == "region") "주변 지역 이야기" else "장소·주변 지역 이야기",
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+    val sources = story.sources.filter { it.url.startsWith("https://") || it.url.startsWith("http://") }
+    if (sources.isEmpty()) {
+        story.sourceName?.let { Text("출처: $it", style = MaterialTheme.typography.labelSmall) }
+    } else {
+        sources.forEach { source ->
+            TextButton(onClick = {
+                try {
+                    uriHandler.openUri(source.url)
+                    linkError = null
+                } catch (e: Exception) {
+                    linkError = "출처 링크를 열 수 없습니다."
+                }
+            }) { Text("출처: ${source.title}", style = MaterialTheme.typography.labelSmall) }
+        }
+    }
+    linkError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 }

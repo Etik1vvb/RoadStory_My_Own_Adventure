@@ -1,20 +1,31 @@
 package com.example.app.ui.profile
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.example.app.data.UserProfile
+import com.example.app.ui.components.RoadStoryFigmaActionButton
+import com.example.app.ui.components.RoadStoryFigmaCanvas
+import com.example.app.ui.components.RoadStoryFigmaCard
+import com.example.app.ui.components.RoadStoryFigmaHeading
+import com.example.app.ui.components.figmaRect
 
-/**
- * 다중 프로필 선택/관리 화면.
- * 데이터 저장은 MainActivity에서 Repository를 통해 처리합니다.
- */
+/** Figma 1700x1184 reference layout. Profile events stay wired to MainActivity. */
 @Composable
 fun ProfileSelectionScreen(
     profiles: List<UserProfile>,
@@ -25,66 +36,68 @@ fun ProfileSelectionScreen(
 ) {
     var deleteTarget by remember { mutableStateOf<UserProfile?>(null) }
     var warning by remember { mutableStateOf<String?>(null) }
+    var pendingProfileId by remember(selectedProfileId) { mutableStateOf(selectedProfileId) }
+    val effectiveId = pendingProfileId?.takeIf { id -> profiles.any { it.id == id } }
+        ?: profiles.firstOrNull()?.id
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Text("사용할 프로필을 선택하세요", style = MaterialTheme.typography.headlineSmall)
-        Text("프로필마다 여행 취향을 따로 저장할 수 있습니다.")
-
-        if (profiles.isEmpty()) {
-            Text("등록된 프로필이 없습니다. 새 프로필을 만들어주세요.")
-        }
-
-        profiles.forEach { profile ->
-            val isSelected = profile.id == selectedProfileId
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                warning = null
-                                onSelectProfile(profile.id)
-                            },
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(profile.nickname.ifBlank { "이름 없는 프로필" }, style = MaterialTheme.typography.titleMedium)
-                        if (isSelected) {
-                            Text("현재 선택된 프로필", color = MaterialTheme.colorScheme.primary)
-                        } else {
-                            Text("선택하려면 누르세요", style = MaterialTheme.typography.bodySmall)
+    RoadStoryFigmaCanvas { unit ->
+        RoadStoryFigmaHeading(
+            title = "사용하실 프로필을 선택해 주세요",
+            subtitle = "프로필마다 여행의 취향을 별도로 저장할 수 있어요!",
+            unit = unit
+        )
+        // Three design-width cards, with horizontal scrolling when profiles exceed two.
+        Box(Modifier.figmaRect(120, 244, 1460, 710, unit)) {
+            Row(
+                modifier = Modifier
+                    .width((1460f * unit).dp)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = (23f * unit).dp, vertical = (21f * unit).dp),
+                horizontalArrangement = Arrangement.spacedBy((54f * unit).dp)
+            ) {
+                profiles.forEach { profile ->
+                    RoadStoryFigmaCard(
+                        title = profile.nickname.ifBlank { "이름 없는 프로필" },
+                        subtitle = when (profile.nickname.trim()) {
+                            "가족" -> "우리 가족 여행 기록"
+                            "연인" -> "♡과의 여행"
+                            else -> "${profile.nickname.ifBlank { "나" }}의 여행 기록"
+                        },
+                        selected = effectiveId == profile.id,
+                        unit = unit,
+                        onClick = { warning = null; pendingProfileId = profile.id },
+                        onManageClick = {
+                            if (profile.id == selectedProfileId) {
+                                warning = "현재 활성화된 프로필은 삭제할 수 없습니다."
+                            } else {
+                                deleteTarget = profile
+                            }
                         }
-                    }
-                    TextButton(onClick = {
-                        if (isSelected) {
-                            warning = "현재 선택되어 있는 프로필은 삭제할 수 없습니다. 다른 프로필을 선택한 후 삭제해주세요."
-                        } else {
-                            warning = null
-                            deleteTarget = profile
-                        }
-                    }) {
-                        Text("삭제", color = MaterialTheme.colorScheme.error)
-                    }
+                    )
                 }
+                RoadStoryFigmaCard(
+                    title = "새 프로필 추가",
+                    subtitle = "새로운 여행을 떠나볼까요?",
+                    selected = false,
+                    unit = unit,
+                    onClick = onAddProfile,
+                    isAdd = true
+                )
             }
         }
-
-        warning?.let { message ->
-            Text(message, color = MaterialTheme.colorScheme.error)
+        warning?.let {
+            Text(
+                text = it,
+                modifier = Modifier.figmaRect(145, 958, 1410, 45, unit),
+                color = Color(0xFFB3263E)
+            )
         }
-
-        Button(onClick = onAddProfile, modifier = Modifier.fillMaxWidth()) {
-            Text("+ 새 프로필 추가")
-        }
+        RoadStoryFigmaActionButton(
+            title = "여행 시작하기",
+            unit = unit,
+            enabled = effectiveId != null,
+            onClick = { effectiveId?.let(onSelectProfile) }
+        )
     }
 
     deleteTarget?.let { target ->
@@ -94,20 +107,15 @@ fun ProfileSelectionScreen(
             text = { Text("'${target.nickname}' 프로필을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.") },
             confirmButton = {
                 TextButton(onClick = {
-                    // 확인 버튼을 누른 사이 선택 상태가 바뀌었을 때도 삭제를 차단합니다.
                     if (target.id == selectedProfileId) {
-                        warning = "현재 선택되어 있는 프로필은 삭제할 수 없습니다."
+                        warning = "현재 활성화된 프로필은 삭제할 수 없습니다."
                     } else {
                         onDeleteProfile(target.id)
                     }
                     deleteTarget = null
-                }) {
-                    Text("삭제", color = MaterialTheme.colorScheme.error)
-                }
+                }) { Text("삭제", color = Color(0xFFB3263E)) }
             },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) { Text("취소") }
-            }
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("취소") } }
         )
     }
 }
